@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 from flasgger import Swagger
 from flask_cors import CORS
 import time
+from werkzeug.exceptions import HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 
 # Load environment variables
 load_dotenv()
@@ -35,19 +37,21 @@ def create_app(test_config=None):
     
     # Default configuration
     app.config.from_mapping(
-        SECRET_KEY=os.environ.get('SECRET_KEY', 'dev'),
-        #SQLALCHEMY_DATABASE_URI=os.environ.get('SQLALCHEMY_DATABASE_URI', 'sqlite:///instance/bank.db'),
+        SECRET_KEY=os.environ.get('SECRET_KEY', os.urandom(24).hex()),
         SQLALCHEMY_DATABASE_URI=os.environ.get(
             'SQLALCHEMY_DATABASE_URI',
             f"sqlite:///{os.path.join(app.instance_path, 'bank.db')}"
         ),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
-        JWT_SECRET_KEY=os.environ.get('JWT_SECRET_KEY', 'jwt-secret-key'),
+        JWT_SECRET_KEY=os.environ.get('JWT_SECRET_KEY', os.urandom(24).hex()),
         JWT_ACCESS_TOKEN_EXPIRES=3600,  # 1 hour
+        JWT_COOKIE_SECURE=True,
+        JWT_COOKIE_CSRF_PROTECT=True,
+        JWT_CSRF_CHECK_FORM=True,
     )
     
-    # Enable debug mode
-    app.debug = True
+    # Enable debug mode only in development
+    app.debug = os.environ.get('FLASK_ENV') == 'development'
 
     if test_config is None:
         # Load the instance config, if it exists, when not testing
@@ -70,14 +74,12 @@ def create_app(test_config=None):
     # Configure JWT handling
     @jwt.user_identity_loader
     def user_identity_lookup(identity):
-        # Always convert identity to string for JWT
         return str(identity)
     
     @jwt.user_lookup_loader
     def user_lookup_callback(_jwt_header, jwt_data):
         identity = jwt_data["sub"]
         try:
-            # Convert back to int for database lookup
             user_id = int(identity)
             from app.models.user import User
             return User.query.filter_by(id=user_id).one_or_none()
@@ -85,21 +87,49 @@ def create_app(test_config=None):
             return None
     
     # Error handling
+    @app.errorhandler(HTTPException)
+    def handle_http_error(error):
+        return jsonify({
+            "error": error.name,
+            "message": error.description
+        }), error.code
+
+    @app.errorhandler(SQLAlchemyError)
+    def handle_db_error(error):
+        app.logger.error(f"Database error: {str(error)}")
+        return jsonify({
+            "error": "Database error",
+            "message": "An error occurred while processing your request"
+        }), 500
+
+    @app.errorhandler(Exception)
+    def handle_generic_error(error):
+        app.logger.error(f"Unexpected error: {str(error)}")
+        return jsonify({
+            "error": "Internal server error",
+            "message": "An unexpected error occurred"
+        }), 500
+
     @jwt.expired_token_loader
     def expired_token_callback(_jwt_header, jwt_payload):
-        return jsonify({"msg": "Token has expired"}), 401
+        return jsonify({
+            "error": "Token expired",
+            "message": "The token has expired, please login again"
+        }), 401
     
     @jwt.invalid_token_loader
     def invalid_token_callback(error):
-        return jsonify({"msg": "Invalid token"}), 401
+        return jsonify({
+            "error": "Invalid token",
+            "message": "The provided token is invalid"
+        }), 401
     
     @jwt.unauthorized_loader
     def missing_token_callback(error):
-        return jsonify({"msg": "Authentication required"}), 401
-        
-    # In testing mode, make token expiration predictable
-    if app.config.get('TESTING'):
-        app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 1  # 1 second for tests
+        return jsonify({
+            "error": "Authentication required",
+            "message": "Please provide a valid authentication token"
+        }), 401
 
     # Add security headers
     @app.after_request
@@ -113,18 +143,16 @@ def create_app(test_config=None):
         response.headers['X-XSS-Protection'] = '1; mode=block'
         response.headers['Content-Security-Policy'] = "default-src 'self'"
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
         
         return response
     
-    # Implement rate limiting
+    # Implement rate limiting for all endpoints
     @app.before_request
     def rate_limiting():
         # Skip rate limiting in test mode
         if app.config.get('TESTING'):
-            return
-        
-        # Skip rate limiting for non-auth endpoints
-        if not request.path.startswith('/api/auth') and not request.path.startswith('/api/login'):
             return
         
         # Get the client IP and user agent for better identification
@@ -143,7 +171,8 @@ def create_app(test_config=None):
         # Check current request count
         if client_id in request_counts and len(request_counts[client_id]) >= RATE_LIMIT:
             return jsonify({
-                "error": "Too many requests, please try again later",
+                "error": "Rate limit exceeded",
+                "message": "Too many requests, please try again later",
                 "retry_after": RATE_LIMIT_WINDOW
             }), 429
         
@@ -164,14 +193,21 @@ def create_app(test_config=None):
     # Root endpoint for testing
     @app.route('/')
     def home():
-        return jsonify({"message": "Welcome to the Banking API"})
+        return jsonify({
+            "message": "Welcome to the Banking API",
+            "version": "1.0.0",
+            "status": "operational"
+        })
 
     # CLI commands
     @app.cli.command('init-db')
     def init_db_command():
         """Clear the existing data and create new tables."""
-        db.drop_all()
-        db.create_all()
-        print('Initialized the database.')
+        try:
+            db.drop_all()
+            db.create_all()
+            print('Initialized the database.')
+        except SQLAlchemyError as e:
+            print(f'Error initializing database: {str(e)}')
 
     return app 
