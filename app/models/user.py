@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 import re
 import secrets
+from sqlalchemy import event
 
 class UserRole(Enum):
     USER = 'user'
@@ -27,14 +28,24 @@ class User(db.Model):
     is_verified = db.Column(db.Boolean, nullable=False, default=False)
     verification_token = db.Column(db.String(100), nullable=True)
     verification_token_expires = db.Column(db.DateTime, nullable=True)
+    failed_login_attempts = db.Column(db.Integer, nullable=False, default=0)
+    last_failed_login = db.Column(db.DateTime, nullable=True)
+    is_locked = db.Column(db.Boolean, nullable=False, default=False)
+    lock_expires = db.Column(db.DateTime, nullable=True)
     accounts = db.relationship('Account', backref='owner', lazy=True)
 
     def __init__(self, **kwargs):
         super(User, self).__init__(**kwargs)
         if 'password' in kwargs:
-            self.password_hash = bcrypt.generate_password_hash(kwargs['password']).decode('utf-8')
+            self.set_password(kwargs['password'])
         if not self.role:
             self.role = UserRole.USER.value
+
+    def set_password(self, password):
+        """Set password with proper hashing"""
+        if not password or not isinstance(password, str):
+            raise ValueError("Password must be a non-empty string")
+        self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
 
     def validate(self):
         """Validate user data"""
@@ -75,11 +86,28 @@ class User(db.Model):
         return errors
 
     def check_password(self, password):
-        return bcrypt.check_password_hash(self.password_hash, password)
-    
-    @staticmethod
-    def generate_password_hash(password):
-        return bcrypt.generate_password_hash(password).decode('utf-8')
+        """Check password and handle failed attempts"""
+        if self.is_locked and self.lock_expires and datetime.utcnow() < self.lock_expires:
+            return False
+            
+        if bcrypt.check_password_hash(self.password_hash, password):
+            self.failed_login_attempts = 0
+            self.last_failed_login = None
+            self.is_locked = False
+            self.lock_expires = None
+            db.session.commit()
+            return True
+            
+        self.failed_login_attempts += 1
+        self.last_failed_login = datetime.utcnow()
+        
+        # Lock account after 5 failed attempts for 30 minutes
+        if self.failed_login_attempts >= 5:
+            self.is_locked = True
+            self.lock_expires = datetime.utcnow() + timedelta(minutes=30)
+            
+        db.session.commit()
+        return False
     
     def update_last_login(self):
         self.last_login = datetime.utcnow()
@@ -121,5 +149,14 @@ class User(db.Model):
             'created_at': self.created_at.isoformat(),
             'last_login': self.last_login.isoformat() if self.last_login else None,
             'role': self.role,
-            'is_verified': self.is_verified
-        } 
+            'is_verified': self.is_verified,
+            'is_locked': self.is_locked,
+            'lock_expires': self.lock_expires.isoformat() if self.lock_expires else None
+        }
+
+# Event listener to ensure username and email are lowercase
+@event.listens_for(User, 'before_insert')
+@event.listens_for(User, 'before_update')
+def lowercase_username_email(mapper, connection, target):
+    target.username = target.username.lower()
+    target.email = target.email.lower() 
