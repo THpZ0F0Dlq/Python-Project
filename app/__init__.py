@@ -22,6 +22,26 @@ request_counts = {}
 RATE_LIMIT = 15
 # Time window in seconds
 RATE_LIMIT_WINDOW = 60
+# Last cleanup time
+last_cleanup = time.time()
+# Cleanup interval in seconds
+CLEANUP_INTERVAL = 300  # 5 minutes
+
+def cleanup_old_requests():
+    """Clean up old request records"""
+    global last_cleanup
+    current_time = time.time()
+    
+    # Only cleanup periodically
+    if current_time - last_cleanup < CLEANUP_INTERVAL:
+        return
+        
+    last_cleanup = current_time
+    for ip in list(request_counts.keys()):
+        request_counts[ip] = [req_time for req_time in request_counts[ip] 
+                            if current_time - req_time < RATE_LIMIT_WINDOW]
+        if not request_counts[ip]:
+            del request_counts[ip]
 
 def create_app(test_config=None):
     # Create and configure the app
@@ -36,12 +56,15 @@ def create_app(test_config=None):
     # Default configuration
     app.config.from_mapping(
         SECRET_KEY=os.environ.get('SECRET_KEY', 'dev'),
-        #SQLALCHEMY_DATABASE_URI=os.environ.get('SQLALCHEMY_DATABASE_URI', 'sqlite:///instance/bank.db'),
         SQLALCHEMY_DATABASE_URI=os.environ.get(
             'SQLALCHEMY_DATABASE_URI',
-            f"sqlite:///{os.path.join(app.instance_path, 'bank.db')}"
+            f"sqlite:///{os.path.join(app.instance_path, 'bank.db')}".replace('\\', '/')
         ),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        SQLALCHEMY_ENGINE_OPTIONS={
+            'pool_pre_ping': True,
+            'pool_recycle': 300,
+        },
         JWT_SECRET_KEY=os.environ.get('JWT_SECRET_KEY', 'jwt-secret-key'),
         JWT_ACCESS_TOKEN_EXPIRES=3600,  # 1 hour
     )
@@ -87,15 +110,27 @@ def create_app(test_config=None):
     # Error handling
     @jwt.expired_token_loader
     def expired_token_callback(_jwt_header, jwt_payload):
-        return jsonify({"msg": "Token has expired"}), 401
+        return jsonify({
+            "error": "Token expired",
+            "message": "The token has expired. Please login again to get a new token.",
+            "code": "token_expired"
+        }), 401
     
     @jwt.invalid_token_loader
     def invalid_token_callback(error):
-        return jsonify({"msg": "Invalid token"}), 401
+        return jsonify({
+            "error": "Invalid token",
+            "message": "The provided token is invalid or malformed.",
+            "code": "invalid_token"
+        }), 401
     
     @jwt.unauthorized_loader
     def missing_token_callback(error):
-        return jsonify({"msg": "Authentication required"}), 401
+        return jsonify({
+            "error": "Authentication required",
+            "message": "No authentication token was provided. Please login to get a token.",
+            "code": "missing_token"
+        }), 401
         
     # In testing mode, make token expiration predictable
     if app.config.get('TESTING'):
@@ -109,10 +144,11 @@ def create_app(test_config=None):
             return response
 
         response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['X-Frame-Options'] = 'SAMEORIGIN'
         response.headers['X-XSS-Protection'] = '1; mode=block'
-        response.headers['Content-Security-Policy'] = "default-src 'self'"
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         
         return response
     
@@ -131,16 +167,16 @@ def create_app(test_config=None):
         client_ip = request.remote_addr
         current_time = time.time()
         
-        # Clean up old requests
-        for ip in list(request_counts.keys()):
-            request_counts[ip] = [req_time for req_time in request_counts[ip] 
-                                  if current_time - req_time < RATE_LIMIT_WINDOW]
-            if not request_counts[ip]:
-                del request_counts[ip]
+        # Clean up old requests periodically
+        cleanup_old_requests()
         
         # Check current request count
         if client_ip in request_counts and len(request_counts[client_ip]) >= RATE_LIMIT:
-            return jsonify({"error": "Too many requests, please try again later"}), 429
+            return jsonify({
+                "error": "Too many requests",
+                "message": f"Please try again in {RATE_LIMIT_WINDOW} seconds",
+                "retry_after": RATE_LIMIT_WINDOW
+            }), 429
         
         # Add current request
         if client_ip not in request_counts:
