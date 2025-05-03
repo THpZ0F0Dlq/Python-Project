@@ -3,7 +3,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.models.account import Account
 from app.models.transaction import Transaction
-from app.utils.validators import validate_amount, error_response
+from app.utils.validators import error_response
 from werkzeug.exceptions import BadRequest
 from sqlalchemy.exc import IntegrityError
 from decimal import Decimal
@@ -14,6 +14,24 @@ bp = Blueprint('transactions', __name__, url_prefix='/api/transactions')
 
 # Maximum transaction amount
 MAX_TRANSACTION_AMOUNT = Decimal('100000.00')
+
+def validate_transaction_data(data, required_fields):
+    """Validate transaction request data"""
+    if not data:
+        return error_response('Request body is required', 400)
+    
+    if not all(k in data for k in required_fields):
+        return error_response(f'Missing required fields: {", ".join(required_fields)}', 400)
+    
+    try:
+        amount = Decimal(str(data['amount']))
+        if amount <= 0:
+            return error_response('Amount must be a positive number', 400)
+        if amount > MAX_TRANSACTION_AMOUNT:
+            return error_response(f'Amount cannot exceed {MAX_TRANSACTION_AMOUNT}', 400)
+        return amount
+    except (ValueError, TypeError):
+        return error_response('Amount must be a valid number', 400)
 
 @bp.route('', methods=['GET'])
 @jwt_required()
@@ -110,22 +128,10 @@ def deposit():
         user_id = int(get_jwt_identity())
         data = request.get_json()
         
-        # Validate required fields
-        if not data:
-            return error_response('Request body is required', 400)
-        
-        if not all(k in data for k in ('account_id', 'amount')):
-            return error_response('Account ID and amount are required', 400)
-        
         # Validate amount
-        try:
-            amount = Decimal(str(data['amount']))
-            if amount <= 0:
-                return error_response('Amount must be a positive number', 400)
-            if amount > MAX_TRANSACTION_AMOUNT:
-                return error_response(f'Amount cannot exceed {MAX_TRANSACTION_AMOUNT}', 400)
-        except (ValueError, TypeError):
-            return error_response('Amount must be a valid number', 400)
+        amount = validate_transaction_data(data, ['account_id', 'amount'])
+        if not isinstance(amount, Decimal):
+            return amount  # Return error response if validation failed
         
         # Get the account
         account = Account.query.filter_by(
@@ -170,22 +176,10 @@ def withdraw():
         user_id = int(get_jwt_identity())
         data = request.get_json()
         
-        # Validate required fields
-        if not data:
-            return error_response('Request body is required', 400)
-        
-        if not all(k in data for k in ('account_id', 'amount')):
-            return error_response('Account ID and amount are required', 400)
-        
         # Validate amount
-        try:
-            amount = Decimal(str(data['amount']))
-            if amount <= 0:
-                return error_response('Amount must be a positive number', 400)
-            if amount > MAX_TRANSACTION_AMOUNT:
-                return error_response(f'Amount cannot exceed {MAX_TRANSACTION_AMOUNT}', 400)
-        except (ValueError, TypeError):
-            return error_response('Amount must be a valid number', 400)
+        amount = validate_transaction_data(data, ['account_id', 'amount'])
+        if not isinstance(amount, Decimal):
+            return amount  # Return error response if validation failed
         
         # Get the account
         account = Account.query.filter_by(
@@ -230,22 +224,10 @@ def transfer():
         user_id = int(get_jwt_identity())
         data = request.get_json()
         
-        # Validate required fields
-        if not data:
-            return error_response('Request body is required', 400)
-        
-        if not all(k in data for k in ('from_account_id', 'to_account_id', 'amount')):
-            return error_response('From account ID, to account ID, and amount are required', 400)
-        
         # Validate amount
-        try:
-            amount = Decimal(str(data['amount']))
-            if amount <= 0:
-                return error_response('Amount must be a positive number', 400)
-            if amount > MAX_TRANSACTION_AMOUNT:
-                return error_response(f'Amount cannot exceed {MAX_TRANSACTION_AMOUNT}', 400)
-        except (ValueError, TypeError):
-            return error_response('Amount must be a valid number', 400)
+        amount = validate_transaction_data(data, ['from_account_id', 'to_account_id', 'amount'])
+        if not isinstance(amount, Decimal):
+            return amount  # Return error response if validation failed
         
         # Check if accounts are different
         if data['from_account_id'] == data['to_account_id']:
@@ -269,80 +251,6 @@ def transfer():
         
         if not to_account:
             return error_response('Destination account not found', 404)
-        
-        # Create transaction
-        transaction = Transaction(
-            transaction_type='transfer',
-            amount=amount,
-            from_account_id=from_account.id,
-            to_account_id=to_account.id,
-            description=data.get('description', f'Transfer from {from_account.account_number} to {to_account.account_number}')
-        )
-        
-        # Process transaction
-        transaction.process()
-        
-        return jsonify({
-            'message': 'Transfer successful',
-            'transaction': transaction.to_dict(),
-            'from_account_balance': float(from_account.balance),
-            'to_account_balance': float(to_account.balance)
-        })
-
-    except BadRequest as e:
-        return error_response(str(e), 400)
-    except IntegrityError:
-        db.session.rollback()
-        return error_response('Database error occurred', 500)
-    except Exception as e:
-        current_app.logger.error(f"Error processing transfer: {str(e)}")
-        return error_response("Failed to process transfer", 500)
-
-@bp.route('/transfer-advanced', methods=['POST'])
-@jwt_required()
-def transfer_advanced():
-    try:
-        user_id = int(get_jwt_identity())
-        data = request.get_json()
-        
-        # Validate required fields
-        if not data:
-            return error_response('Request body is required', 400)
-        
-        if not all(k in data for k in ('from_account_id', 'to_account_id', 'amount')):
-            return error_response('From account ID, to account ID, and amount are required', 400)
-        
-        # Validate amount
-        try:
-            amount = Decimal(str(data['amount']))
-            if amount <= 0:
-                return error_response('Amount must be a positive number', 400)
-            if amount > MAX_TRANSACTION_AMOUNT:
-                return error_response(f'Amount cannot exceed {MAX_TRANSACTION_AMOUNT}', 400)
-        except (ValueError, TypeError):
-            return error_response('Amount must be a valid number', 400)
-        
-        # Get the accounts
-        from_account = Account.query.filter_by(
-            id=data['from_account_id'],
-            user_id=user_id,
-            is_active=True
-        ).first()
-        
-        if not from_account:
-            return error_response('Source account not found or does not belong to you', 404)
-        
-        to_account = Account.query.filter_by(
-            id=data['to_account_id'],
-            is_active=True
-        ).first()
-        
-        if not to_account:
-            return error_response('Destination account not found', 404)
-        
-        # Check if accounts are different
-        if from_account.id == to_account.id:
-            return error_response('Cannot transfer to the same account', 400)
         
         # Create transaction
         transaction = Transaction(
@@ -459,27 +367,15 @@ def account_transactions(account_id):
         elif request.method == 'POST':
             data = request.get_json()
             
-            # Validate required fields
-            if not data:
-                return error_response('Request body is required', 400)
-            
-            if not all(k in data for k in ('amount', 'type')):
-                return error_response('Amount and transaction type are required', 400)
+            # Validate amount
+            amount = validate_transaction_data(data, ['amount', 'type'])
+            if not isinstance(amount, Decimal):
+                return amount  # Return error response if validation failed
             
             # Validate transaction type
             tx_type = data['type']
             if tx_type not in Transaction.VALID_TRANSACTION_TYPES:
                 return error_response(f'Invalid transaction type. Must be one of: {", ".join(Transaction.VALID_TRANSACTION_TYPES)}', 400)
-            
-            # Validate amount
-            try:
-                amount = Decimal(str(data['amount']))
-                if amount <= 0:
-                    return error_response('Amount must be a positive number', 400)
-                if amount > MAX_TRANSACTION_AMOUNT:
-                    return error_response(f'Amount cannot exceed {MAX_TRANSACTION_AMOUNT}', 400)
-            except (ValueError, TypeError):
-                return error_response('Amount must be a valid number', 400)
             
             # Create transaction based on type
             if tx_type == 'deposit':
