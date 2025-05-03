@@ -212,13 +212,11 @@ def validate_password_complexity(password):
     - Contains a number
     - Contains a special character
     """
-
-    if not isinstance(password,str) or not password:
-        return False, "Password must be a non-empty string"
+    if not isinstance(password, str) or not password:
+        return False
 
     # For testing convenience, accept simple passwords in test mode
     from flask import current_app
-
     if current_app.config.get("TESTING"):
         return len(password) >= 5  # Use simple validation in test mode
 
