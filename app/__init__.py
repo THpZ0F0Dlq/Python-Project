@@ -127,25 +127,30 @@ def create_app(test_config=None):
         if not request.path.startswith('/api/auth') and not request.path.startswith('/api/login'):
             return
         
-        # Get the client IP
+        # Get the client IP and user agent for better identification
         client_ip = request.remote_addr
+        user_agent = request.headers.get('User-Agent', '')
+        client_id = f"{client_ip}:{user_agent}"
         current_time = time.time()
         
         # Clean up old requests
-        for ip in list(request_counts.keys()):
-            request_counts[ip] = [req_time for req_time in request_counts[ip] 
-                                  if current_time - req_time < RATE_LIMIT_WINDOW]
-            if not request_counts[ip]:
-                del request_counts[ip]
+        for client in list(request_counts.keys()):
+            request_counts[client] = [req_time for req_time in request_counts[client] 
+                                    if current_time - req_time < RATE_LIMIT_WINDOW]
+            if not request_counts[client]:
+                del request_counts[client]
         
         # Check current request count
-        if client_ip in request_counts and len(request_counts[client_ip]) >= RATE_LIMIT:
-            return jsonify({"error": "Too many requests, please try again later"}), 429
+        if client_id in request_counts and len(request_counts[client_id]) >= RATE_LIMIT:
+            return jsonify({
+                "error": "Too many requests, please try again later",
+                "retry_after": RATE_LIMIT_WINDOW
+            }), 429
         
         # Add current request
-        if client_ip not in request_counts:
-            request_counts[client_ip] = []
-        request_counts[client_ip].append(current_time)
+        if client_id not in request_counts:
+            request_counts[client_id] = []
+        request_counts[client_id].append(current_time)
 
     # Register models
     from app.models import user, account, transaction

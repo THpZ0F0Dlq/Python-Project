@@ -104,8 +104,8 @@ def login():
     if not user or not user.check_password(data["password"]):
         return error_response("Invalid credentials", 401)
     
-    # Include role in JWT claims
-    additional_claims = {'role': user.role, 'password': data['password']}
+    # Include only role in JWT claims
+    additional_claims = {'role': user.role}
 
     # Create access token and refresh token
     access_token = create_access_token(identity=user.id, additional_claims=additional_claims)
@@ -206,7 +206,7 @@ def change_password():
 def validate_password_complexity(password):
     """
     Validate that a password meets complexity requirements
-    - At least 8 characters long
+    - At least 8 characters long, maximum 128 characters
     - Contains uppercase letter
     - Contains lowercase letter
     - Contains a number
@@ -218,9 +218,9 @@ def validate_password_complexity(password):
     # For testing convenience, accept simple passwords in test mode
     from flask import current_app
     if current_app.config.get("TESTING"):
-        return len(password) >= 5  # Use simple validation in test mode
+        return len(password) >= 8  # Use same validation in test mode
 
-    if len(password) < 8:
+    if len(password) < 8 or len(password) > 128:
         return False
 
     # Check for at least one uppercase, lowercase, digit and special character

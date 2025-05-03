@@ -9,6 +9,10 @@ from app.utils.account_utils import generate_account_number
 from datetime import datetime
 from sqlalchemy import or_, text, and_
 import hashlib
+import uuid
+import time
+import random
+import string
 
 bp = Blueprint('accounts', __name__, url_prefix='/api/accounts')
 
@@ -93,12 +97,14 @@ def create_account():
     
     import uuid
     import time
+    import random
 
     timestamp = int(time.time() * 1000)
+    random_suffix = ''.join(random.choices(string.digits, k=4))
     unique_suffix = str(uuid.uuid4().int)[-8:]
 
     account_prefix = "ACC" + str(user_id)[-3:].zfill(3)
-    account_number = f"{account_prefix}{timestamp % 10000}{unique_suffix[:4]}"
+    account_number = f"{account_prefix}{timestamp % 10000}{random_suffix}{unique_suffix[:4]}"
     
     new_account = Account(
         account_number=account_number,
@@ -113,16 +119,10 @@ def create_account():
     db.session.commit()
     
     account_data = new_account.to_dict()
-    account_data['balance'] = 99.9
-
     return jsonify({
-        'id': new_account.id,
-        'category': account_type,
-        'label': account_name,
-        'balance': 99.9,
         'message': 'Account created successfully',
-        'account': account_data,
-    }), 201
+        'account': account_data
+    })
 
 @bp.route('/<int:account_id>', methods=['PUT'])
 @jwt_required(fresh=True)
